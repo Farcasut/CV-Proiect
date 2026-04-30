@@ -1,20 +1,47 @@
+from xmlrpc.client import MAXINT, MININT
+
 import cv2
 import numpy as np
 import sys
 import os
 
 DEBUG = True
+DEBUG_IMAGES = []
 
-def display_images(images: list, height=1920, width=1080):
-    for i, img in enumerate(images):
+# Empirically selected.
+WARP_SIZE = 1000
+
+
+def display_images(images, height=1080, width=1920):
+    # Safety: ensure correct format
+    if len(images) == 0:
+        return
+    idx = 0
+    while True:
+        img, title = images[idx]
         if img is None:
-            continue
-        img_resized = cv2.resize(img, (height, width))
-
-        window_name = f"Image {i}"
-        cv2.imshow(window_name, img_resized)
-
-    cv2.waitKey(0)
+            img = np.zeros((height, width, 3), dtype=np.uint8)
+        img_resized = cv2.resize(img, (width, height))
+        display = img_resized.copy()
+        if len(display.shape) == 2:
+            display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
+        cv2.putText(
+            display,
+            f"{title} ({idx+1}/{len(images)})",
+            (30, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.5,
+            (0, 0, 255),
+            3
+        )
+        cv2.imshow("Image Viewer", display)
+        key = cv2.waitKey(0) & 0xFF
+        if key in [83, ord('d'), ord('l')]:
+            idx = (idx + 1) % len(images)
+        elif key in [81, ord('a'), ord('h')]:
+            idx = (idx - 1) % len(images)
+        elif key in [27, ord('q')]:
+            break
     cv2.destroyAllWindows()
 
 
@@ -37,6 +64,21 @@ def _extract_quad_from_hull(hull: np.ndarray) -> np.ndarray:
     tr = pts[np.argmin(diff)]
     bl = pts[np.argmax(diff)]
     return np.array([[tl], [tr], [br], [bl]], dtype=np.float32)
+
+def order_corners(pts: np.ndarray) -> np.ndarray:
+    pts = pts.reshape(4, 2).astype(np.float32)
+    rect = np.zeros((4, 2), dtype=np.float32)
+    s    = pts.sum(axis=1)
+    diff = np.diff(pts, axis=1).ravel()
+    # top left smallest x+y
+    rect[0] = pts[np.argmin(s)]
+    # top right  smallest x-y
+    rect[1] = pts[np.argmin(diff)]
+    # bottom-right largest x+y
+    rect[2] = pts[np.argmax(s)]
+    # bottom-left largest x-y
+    rect[3] = pts[np.argmax(diff)]
+    return rect
 
 def detect_board_quad(img, scale):
     h, w = img.shape[:2]
@@ -73,21 +115,28 @@ def detect_board_quad(img, scale):
 
     # Scale corners back to original image resolution
     corners = approx.reshape(-1, 2).astype(np.float32) / scale
-    print(corners)
+    corners = order_corners(corners)
     if DEBUG:
         enchanted_image = visualize_corners(img, corners)
-        display_images([enchanted_image, wood_maks, board_mask])
+        DEBUG_IMAGES.append((wood_maks, 'wood_mask'))
+        DEBUG_IMAGES.append((board_mask, 'board_mask'))
+        DEBUG_IMAGES.append((enchanted_image, 'enchanted_image'))
     return corners
 
 
 
 
-
-def wrap_board(img, corners, output_size):
-    pass
-
-
-
+def wrap_board(img, corners, output_size = WARP_SIZE):
+    if corners is None:
+        # This is pure hope. If the corners are missing I'm already fucked.
+        corners = detect_board_quad(img, 0.5)
+    n = output_size-1
+    dst = np.array([[0, 0], [n, 0], [n, n], [0, n]], dtype=np.float32)
+    homography = cv2.getPerspectiveTransform(corners, dst)
+    warped = cv2.warpPerspective(img, homography, (output_size, output_size))
+    if DEBUG:
+        DEBUG_IMAGES.append((warped, 'warped'))
+    return warped
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -101,4 +150,6 @@ if __name__ == "__main__":
         print("Could not read image")
         sys.exit(1)
 
-    detect_board_quad(img, scale=0.25)
+    corners = detect_board_quad(img, scale=0.25)
+    warped = wrap_board(img, corners)
+    display_images(DEBUG_IMAGES)
